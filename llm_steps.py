@@ -46,19 +46,42 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+# Fix 4: Language tiers — Tier 2 languages get additional prompting scaffolding.
+# Tier 1: high training data, Claude generates natively.
+# Tier 2: moderate data, needs explicit register guidance to avoid Hindi/English calques.
+_TIER1_LANGUAGES = {"english", "hindi", "bengali", "tamil", "urdu"}
+_TIER2_LANGUAGES = {"gujarati", "marathi", "telugu", "kannada", "malayalam", "punjabi", "odia"}
+
+
+def _language_tier(language: str) -> int:
+    lang = language.lower()
+    if lang in _TIER1_LANGUAGES:
+        return 1
+    if lang in _TIER2_LANGUAGES:
+        return 2
+    return 2  # unknown languages treated as Tier 2
+
+
 def generate_outline(theme: str, age_group: str, language: str = "English") -> dict:
     """
     Calls Claude to produce a story outline as JSON.
     Returns: {title: str, characters: list[str], plot_points: list[str]}
     Raises ValueError if the response is malformed or missing required fields.
     """
+    # Fix 1: Specify plot_points language so the entire outline is seeded in the target
+    # language — prevents mixed-language outline (GU title + EN plot_points) that causes
+    # the model to translate rather than think natively when writing the story.
+    lang_instruction = (
+        f"Generate the title, all character names, and all plot points in {language}. "
+        if language.lower() != "english"
+        else ""
+    )
     system = (
         "You are a children's story outline generator for an Indian audience. "
-        "Use Indian cultural context: Indian names (Arjun, Priya, Meera, Raju, Amma, Dadi), "
-        "Indian animals (cow, elephant, peacock, monkey, parrot), Indian settings (village, "
-        "river, mango tree, dosa stall, festival ground), and Indian cultural elements "
-        "(Diwali, Holi, chai, roti, monsoon) where appropriate. "
-        f"Generate the title and all character names in {language}. "
+        "Weave in Indian cultural context where it fits the story naturally — "
+        "Indian names, animals, settings, foods, and festivals — "
+        "but only include elements that genuinely serve the narrative. "
+        f"{lang_instruction}"
         "Respond ONLY with a valid JSON object. "
         "Do not include markdown code fences, explanations, or any text outside the JSON."
     )
@@ -160,16 +183,31 @@ def write_story(outline: dict, age_group: str, language: str = "English") -> str
         ),
     }[age_group]
 
-    language_instruction = (
-        ""
-        if language.lower() == "english"
-        else f"Write the entire story in {language}. Use {language} script throughout. "
-    )
+    if language.lower() == "english":
+        language_instruction = ""
+    elif _language_tier(language) == 1:
+        # Fix 2 (Tier 1): Strong language capability — script enforcement is sufficient.
+        language_instruction = (
+            f"Write the entire story in {language}. Use {language} script throughout. "
+        )
+    else:
+        # Fix 2 (Tier 2): Weaker training data — add native register guidance to prevent
+        # the model from translating Hindi/English vocabulary into the target script.
+        language_instruction = (
+            f"Write the entire story in {language}. Use {language} script throughout. "
+            f"Use vocabulary and phrasing that a native {language}-speaking grandparent "
+            f"would use naturally with a small child — do not translate from Hindi or English. "
+            f"Choose words by how they feel in {language}, not by what they mean in another language. "
+        )
+
     system = (
         f"You are a creative children's story writer for an Indian audience. "
         f"Write {age_guidance}. "
-        f"Use Indian cultural context throughout: Indian names, settings, animals, foods, "
-        f"and festivals where natural. "
+        # Fix 3: Cultural elements are narrative-optional, not mandatory — prevents the model
+        # from force-inserting animals/settings that have no story function.
+        f"Weave in Indian cultural context where it fits the story naturally — Indian names, "
+        f"settings, animals, foods, and festivals — but only include elements that genuinely "
+        f"serve the narrative. Do not insert cultural details that don't earn their place. "
         f"{language_instruction}"
         f"Return ONLY the story text. No title header, no author note, no markdown — just the story."
     )
